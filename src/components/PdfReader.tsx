@@ -60,6 +60,32 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
   const [error, setError] = useState<string | null>(null);
   const [showThumbs, setShowThumbs] = useState(false);
   const [renderedCount, setRenderedCount] = useState(0);
+  const [buildNonce, setBuildNonce] = useState(0);
+
+  // Rebuild the book when the container is resized significantly, so the
+  // page dimensions always fit within the available height and width.
+  useEffect(() => {
+    if (loading || error || numPages === 0) return;
+    const el = containerRef.current;
+    if (!el) return;
+    let lastW = el.clientWidth;
+    let lastH = el.clientHeight;
+    let timer: number | null = null;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (Math.abs(w - lastW) < 40 && Math.abs(h - lastH) < 40) return;
+      lastW = w;
+      lastH = h;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => setBuildNonce((n) => n + 1), 300);
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [loading, error, numPages]);
 
   // Load the PDF document.
   useEffect(() => {
@@ -89,11 +115,33 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
     };
   }, [data]);
 
-  // Page width target based on container.
+  // Compute page dimensions that fit within BOTH the available width (two
+  // pages side by side) and the available height, preserving the PDF aspect
+  // ratio. Without the height constraint, tall PDFs produce a book taller
+  // than the stage and the top/bottom content gets clipped by overflow-hidden.
+  const computePageDims = useCallback(
+    (aspect: number): { width: number; height: number } => {
+      const el = containerRef.current;
+      if (!el) return { width: 480, height: Math.floor(480 * aspect) };
+      const availW = el.clientWidth - 48; // padding + a little breathing room
+      const availH = el.clientHeight - 48;
+      // Two pages side by side share the width.
+      const widthByW = Math.floor(availW / 2);
+      const heightByW = Math.floor(widthByW * aspect);
+      if (heightByW <= availH) {
+        return { width: Math.max(200, widthByW), height: heightByW };
+      }
+      // Height-bound: scale width down so the height fits.
+      const widthByH = Math.floor(availH / aspect);
+      return { width: Math.max(200, widthByH), height: availH };
+    },
+    []
+  );
+
+  // Page width target for rendering page images (matches the book page width).
   const getPageWidth = useCallback(() => {
     const el = containerRef.current;
     if (!el) return 480;
-    // Two pages side by side, minus spine/padding.
     return Math.max(280, Math.floor((el.clientWidth - 64) / 2));
   }, []);
 
@@ -148,28 +196,26 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
     if (loading || error || numPages === 0 || !bookRef.current) return;
     let destroyed = false;
 
-    const pageW = getPageWidth();
-    // Estimate page height from the first page's aspect ratio.
     const doc = docRef.current!;
-    let pageH = Math.floor(pageW * 1.414); // A4-ish fallback
     doc.getPage(1).then((p) => {
       const vp = p.getViewport({ scale: 1 });
-      pageH = Math.floor(pageW * (vp.height / vp.width));
+      const aspect = vp.height / vp.width;
       if (destroyed) return;
-      buildBook(pageW, pageH);
+      const dims = computePageDims(aspect);
+      buildBook(dims.width, dims.height);
     });
 
     const buildBook = (pw: number, ph: number) => {
       if (!bookRef.current) return;
-      const initial = Array.from({ length: numPages }, () => PLACEHOLDER);
+      // Reuse already-rendered page images so resize-rebuilds are instant.
+      const initial = Array.from({ length: numPages }, (_, i) => {
+        const n = i + 1;
+        return renderedRef.current.get(n) ?? PLACEHOLDER;
+      });
       const pf = new PageFlip(bookRef.current, {
         width: pw,
         height: ph,
-        size: "stretch",
-        minWidth: 280,
-        maxWidth: 1200,
-        minHeight: 380,
-        maxHeight: 1600,
+        size: "fixed",
         drawShadow: true,
         flippingTime: 800,
         usePortrait: true,
@@ -185,8 +231,10 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
         disableFlipByClick: false,
       });
 
-      // Start on the saved page (PageFlip uses 0-indexed startPage).
-      (pf as any).setting.startPage = Math.max(0, Math.floor((initialPage - 1) / 2) * 2);
+      // Start on the current page (PageFlip uses 0-indexed startPage). On
+      // first build this is initialPage; on resize-rebuild it's currentPage.
+      const startPage = Math.max(0, Math.floor((currentPage - 1) / 2) * 2);
+      (pf as any).setting.startPage = startPage;
       pf.loadFromImages(initial);
       pageFlipRef.current = pf;
 
@@ -224,7 +272,7 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
       pageFlipRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, error, numPages]);
+  }, [loading, error, numPages, buildNonce]);
 
   // Report progress when the visible page changes.
   useEffect(() => {
