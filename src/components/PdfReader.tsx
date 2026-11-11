@@ -3,7 +3,27 @@ import * as pdfjsLib from "pdfjs-dist";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { PageFlip } from "page-flip";
-import { Loader2, ChevronLeft, ChevronRight, List, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  Loader2,
+  ChevronLeft,
+  ChevronRight,
+  List,
+  ZoomIn,
+  ZoomOut,
+  Headphones,
+  Play,
+  Pause,
+  Square,
+} from "lucide-react";
+import {
+  TTS_VOICES,
+  ensureVoice,
+  isVoiceCached,
+  speak,
+  extractPdfText,
+  type SpeakHandle,
+  type TtsProgress,
+} from "../lib/tts";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorker;
 
@@ -53,6 +73,18 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
   const renderingRef = useRef<Set<number>>(new Set());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastFlipSoundAt = useRef(0);
+
+  // --- TTS (read aloud) state ---
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsQueueRef = useRef<string[]>([]);
+  const ttsSpeakRef = useRef<SpeakHandle | null>(null);
+  const ttsActiveRef = useRef(false);
+  const ttsPlayingRef = useRef(false);
+  const [ttsOpen, setTtsOpen] = useState(false);
+  const [ttsVoice, setTtsVoice] = useState(TTS_VOICES[0].id);
+  const [ttsBusy, setTtsBusy] = useState<"idle" | "downloading" | "reading">("idle");
+  const [ttsPaused, setTtsPaused] = useState(false);
+  const [ttsStatus, setTtsStatus] = useState("");
 
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(Math.max(1, initialPage));
@@ -291,6 +323,184 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
     pageFlipRef.current?.flipNext();
   };
 
+  // --- TTS read-aloud -------------------------------------------------------
+
+  // Pages currently displayed in the book, 1-based, in reading order.
+  const getSpreadPages = useCallback((): number[] => {
+    const pf = pageFlipRef.current;
+    if (!pf || !docRef.current) return [currentPage];
+    const p = pf.getCurrentPageIndex(); // 0-based left/current page
+    if (pf.getOrientation() === "portrait") return [p + 1];
+    // Landscape with showCover: spreads are [0], [1,2], [3,4], ...
+    const n = docRef.current.numPages;
+    if (p === 0) return [1];
+    const e = Math.floor((p + 1) / 2);
+    const pages = [2 * e - 1, 2 * e].filter((x) => x >= 1 && x <= n);
+    return pages;
+  }, [currentPage]);
+
+  // Pump the playback queue: plays blob URLs sequentially while reading.
+  const pumpTtsQueue = useCallback(() => {
+    const el = ttsAudioRef.current;
+    if (!el || ttsPlayingRef.current) return;
+    const next = ttsQueueRef.current.shift();
+    if (!next) return;
+    ttsPlayingRef.current = true;
+    el.src = next;
+    el.onended = () => {
+      URL.revokeObjectURL(next);
+      ttsPlayingRef.current = false;
+      pumpTtsQueue();
+    };
+    el.onerror = () => {
+      URL.revokeObjectURL(next);
+      ttsPlayingRef.current = false;
+      pumpTtsQueue();
+    };
+    el.play().catch(() => {
+      ttsPlayingRef.current = false;
+    });
+  }, []);
+
+  const stopTts = useCallback(() => {
+    ttsActiveRef.current = false;
+    ttsSpeakRef.current?.stop();
+    ttsSpeakRef.current = null;
+    const el = ttsAudioRef.current;
+    if (el) {
+      el.pause();
+      el.removeAttribute("src");
+      el.onended = null;
+      el.onerror = null;
+    }
+    ttsQueueRef.current.forEach((u) => URL.revokeObjectURL(u));
+    ttsQueueRef.current = [];
+    ttsPlayingRef.current = false;
+    setTtsPaused(false);
+    setTtsBusy("idle");
+    setTtsStatus("");
+  }, []);
+
+  // Single read-aloud loop: reads the current spread, drains the playback
+  // queue, flips to the next spread, and repeats until stopped or the book
+  // ends. Runs once; a guard prevents duplicate loops when the user flips
+  // pages manually mid-read.
+  const ttsReadingRef = useRef(false);
+  const readLoop = useCallback(async () => {
+    if (ttsReadingRef.current) return;
+    ttsReadingRef.current = true;
+    try {
+      while (ttsActiveRef.current) {
+        const doc = docRef.current;
+        const pf = pageFlipRef.current;
+        if (!doc || !pf) break;
+        const pages = getSpreadPages();
+        setTtsStatus(`Membaca hlm. ${pages.join(" & ")}…`);
+
+        let text = "";
+        for (const p of pages) {
+          if (!ttsActiveRef.current) break;
+          try {
+            const t = await extractPdfText(doc, p);
+            if (t) text += t + " ";
+          } catch {
+            /* skip unextractable pages */
+          }
+        }
+        if (!ttsActiveRef.current) break;
+
+        if (text.trim()) {
+          const handle = speak(
+            text.trim(),
+            ttsVoice,
+            (blob) => {
+              ttsQueueRef.current.push(URL.createObjectURL(blob));
+              pumpTtsQueue();
+            },
+            (pr: TtsProgress) => {
+              if (pr.total > 0) {
+                setTtsStatus(`Menyusun suara… ${Math.round((pr.loaded / pr.total) * 100)}%`);
+              }
+            }
+          );
+          ttsSpeakRef.current = handle;
+          await handle.promise.catch(() => {});
+          ttsSpeakRef.current = null;
+
+          // Wait for the playback queue to finish speaking.
+          await new Promise<void>((resolve) => {
+            const tick = () => {
+              if (!ttsActiveRef.current) return resolve();
+              if (ttsQueueRef.current.length === 0 && !ttsPlayingRef.current) return resolve();
+              window.setTimeout(tick, 150);
+            };
+            tick();
+          });
+          if (!ttsActiveRef.current) break;
+        }
+
+        // Move to the next spread, or finish at the end of the book.
+        if (pf.getCurrentPageIndex() < doc.numPages - 1) {
+          pf.flipNext();
+          // Give the flip animation a moment to settle before reading.
+          await new Promise((r) => window.setTimeout(r, 350));
+        } else {
+          ttsActiveRef.current = false;
+        }
+      }
+    } finally {
+      ttsReadingRef.current = false;
+      if (ttsActiveRef.current) stopTts();
+      else {
+        setTtsBusy("idle");
+        setTtsStatus("");
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsVoice, getSpreadPages, pumpTtsQueue, stopTts]);
+
+  const startTts = useCallback(async () => {
+    if (ttsBusy === "reading") {
+      // Toggle pause/resume.
+      const el = ttsAudioRef.current;
+      if (el) {
+        if (ttsPaused) {
+          el.play().catch(() => {});
+          setTtsPaused(false);
+        } else {
+          el.pause();
+          setTtsPaused(true);
+        }
+      }
+      return;
+    }
+    setTtsOpen(true);
+    setTtsBusy("downloading");
+    setTtsStatus("Menyiapkan suara…");
+    try {
+      if (!(await isVoiceCached(ttsVoice))) {
+        setTtsStatus("Mengunduh voice (sekali saja)…");
+      }
+      await ensureVoice(ttsVoice, (p) => {
+        if (p.total > 0) {
+          setTtsStatus(`Mengunduh voice… ${Math.round((p.loaded / p.total) * 100)}%`);
+        } else {
+          setTtsStatus(`Mengunduh voice… ${Math.round(p.loaded / 1048576)} MB`);
+        }
+      });
+      ttsActiveRef.current = true;
+      setTtsBusy("reading");
+      readLoop();
+    } catch (e) {
+      setTtsStatus(`Gagal: ${String(e)}`);
+      setTtsBusy("idle");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsBusy, ttsPaused, ttsVoice, readLoop]);
+
+  // Stop TTS on unmount.
+  useEffect(() => stopTts, [stopTts]);
+
   // Keyboard navigation.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -310,6 +520,7 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
   return (
     <div className="relative h-full flex flex-col" style={{ background: "var(--reader-bg)" }}>
       <audio ref={audioRef} src="/sounds/page-flip.mp3" preload="auto" />
+      <audio ref={ttsAudioRef} />
       {/* Stage */}
       <div ref={containerRef} className="flex-1 relative overflow-hidden flex items-center justify-center px-4 py-6">
         {loading && (
@@ -399,7 +610,80 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
         <ControlBtn onClick={() => pageFlipRef.current?.flipNext()} title="Balik kanan">
           <ZoomIn className="w-4 h-4" />
         </ControlBtn>
+        <div className="w-px h-5 mx-1" style={{ background: "var(--border)" }} />
+        <ControlBtn
+          onClick={() => {
+            setTtsOpen((v) => {
+              if (v && ttsBusy === "idle") {
+                // Closing while idle is fine; while reading keep it open.
+              }
+              return !v;
+            });
+          }}
+          active={ttsOpen || ttsBusy === "reading"}
+          title="Bacakan (TTS)"
+        >
+          <Headphones className="w-4 h-4" />
+        </ControlBtn>
       </div>
+
+      {/* TTS read-aloud panel */}
+      {ttsOpen && (
+        <div
+          className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 h-12 rounded-2xl z-30"
+          style={{ background: "var(--surface)", border: "1px solid var(--border)", boxShadow: "var(--shadow-lg)" }}
+        >
+          <select
+            value={ttsVoice}
+            onChange={(e) => setTtsVoice(e.target.value)}
+            disabled={ttsBusy === "reading"}
+            className="h-8 px-2 rounded-lg text-xs focus:outline-none disabled:opacity-50"
+            style={{ background: "var(--surface-hover)", border: "1px solid var(--border)", color: "var(--text)" }}
+            title="Pilih suara"
+          >
+            {TTS_VOICES.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.label}
+              </option>
+            ))}
+          </select>
+
+          <button
+            type="button"
+            onClick={startTts}
+            disabled={ttsBusy === "downloading"}
+            className="h-8 w-8 rounded-full flex items-center justify-center transition-transform active:scale-95 disabled:opacity-50"
+            style={{ background: "var(--accent)", color: "var(--accent-contrast)" }}
+            title={ttsBusy === "reading" ? (ttsPaused ? "Lanjutkan" : "Jeda") : "Bacakan"}
+          >
+            {ttsBusy === "downloading" ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : ttsBusy === "reading" && !ttsPaused ? (
+              <Pause className="w-4 h-4" />
+            ) : (
+              <Play className="w-4 h-4" />
+            )}
+          </button>
+
+          {ttsBusy !== "idle" && (
+            <button
+              type="button"
+              onClick={stopTts}
+              className="h-8 w-8 rounded-full flex items-center justify-center transition-transform active:scale-95"
+              style={{ background: "var(--surface-hover)", border: "1px solid var(--border)", color: "var(--text-muted)" }}
+              title="Berhenti"
+            >
+              <Square className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {ttsStatus && (
+            <span className="text-[11px] whitespace-nowrap" style={{ color: "var(--text-faint)" }}>
+              {ttsStatus}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

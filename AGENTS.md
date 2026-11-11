@@ -43,3 +43,7 @@ npm run typecheck
 - Theme tokens live in `src/styles/theme.css` as CSS variables consumed by inline styles + Tailwind.
 - Reading progress is debounced (600ms) and saved on every page/CFI change; library reorders by last-read on exit.
 - PDF page count is extracted in Rust via `lopdf`; covers use deterministic gradients until real cover extraction is added.
+- The PDF reader uses `page-flip` (StPageFlip) with a two-page spread, flip sound at `public/sounds/page-flip.mp3` (CC0).
+- Book page dimensions are computed to fit within BOTH width and height of the stage — otherwise tall PDFs get clipped top/bottom by `overflow-hidden`.
+- TTS uses Piper via `@mintplex-labs/piper-tts-web` (WASM + ONNX Runtime Web, runs fully in the webview). WASM assets are bundled in `public/tts/` (piper phonemize + onnxruntime). Voice models download once to OPFS and work offline.
+- Indonesian voice `id_ID-news_tts-medium` is NOT on the `diffusionstudio` mirror — `src/lib/tts.ts` registers it in `PATH_MAP` and seeds OPFS directly from `rhasspy/piper-voices` (storage is keyed by filename, so the session resolves from cache).
