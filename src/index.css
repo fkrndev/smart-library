@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/* Tell Tailwind to look for class names in the source files. */
+@source "./src/**/*.{ts,tsx}";
+
+/* Enable class-based dark mode driven by a `dark` class on <html>. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* Aesthetic, paper-like reading surfaces and warm neutrals. */
+@theme {
+  --color-paper: #f7f4ee;
+  --color-ink: #1c1a17;
+  --color-accent: #b07a3a;
+}
+
+/* Custom scrollbar that fits both themes. */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 120, 0.35);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 120, 120, 0.55);
+  background-clip: padding-box;
+}
+
+/* Smooth theme transition across the whole app. */
+html.theme-transition,
+html.theme-transition *,
+html.theme-transition *::before,
+html.theme-transition *::after {
+  transition: background-color 0.35s ease, border-color 0.35s ease,
+    color 0.35s ease, fill 0.35s ease, stroke 0.35s ease !important;
+  transition-delay: 0 !important;
+}
+
+/* Book stage for the page-flip reader. PageFlip injects its own wrapper; we
+   just give the host a warm, paper-like backdrop and a subtle spine shadow. */
+.book-stage {
+  position: relative;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.book-stage .stf__parent {
+  background: transparent;
+}
+/* A faint center spine to sell the "open book" look in landscape mode. */
+.book-stage::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 18px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.18),
+    rgba(0, 0, 0, 0) 40%,
+    rgba(0, 0, 0, 0) 60%,
+    rgba(0, 0, 0, 0.18)
+  );
+  z-index: 2;
+  mix-blend-mode: multiply;
+}

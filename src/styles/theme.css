@@ -1,0 +1,42 @@
+/* Theme tokens for light & dark. We expose them as CSS variables so Tailwind
+   utilities and custom components can both consume them. */
+
+:root {
+  --bg: #f5f2ec;
+  --bg-elevated: #fffdf9;
+  --bg-sunken: #efeae0;
+  --surface: #ffffff;
+  --surface-hover: #f3efe7;
+  --border: #e3ddd1;
+  --border-strong: #d3cab9;
+  --text: #1f1c18;
+  --text-muted: #6b6357;
+  --text-faint: #9a9183;
+  --accent: #a9692c;
+  --accent-soft: #d9b27a;
+  --accent-contrast: #fffaf2;
+  --shadow: 0 1px 2px rgba(40, 30, 15, 0.04), 0 8px 24px rgba(40, 30, 15, 0.06);
+  --shadow-lg: 0 4px 12px rgba(40, 30, 15, 0.08), 0 24px 48px rgba(40, 30, 15, 0.1);
+  --reader-bg: #ece6d8;
+  --reader-page: #fbf8f1;
+}
+
+.dark {
+  --bg: #14141a;
+  --bg-elevated: #1c1c24;
+  --bg-sunken: #0f0f14;
+  --surface: #1e1e26;
+  --surface-hover: #262630;
+  --border: #2c2c38;
+  --border-strong: #3a3a48;
+  --text: #ece9e4;
+  --text-muted: #a3a0ac;
+  --text-faint: #6e6b78;
+  --accent: #d9a866;
+  --accent-soft: #6b5230;
+  --accent-contrast: #1a1408;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.4), 0 24px 48px rgba(0, 0, 0, 0.5);
+  --reader-bg: #1a1a20;
+  --reader-page: #2a2a32;
+}
