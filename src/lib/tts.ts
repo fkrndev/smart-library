@@ -45,7 +45,7 @@ const LOCAL_WASM = {
   piperWasm: "/tts/piper/piper_phonemize.wasm",
 };
 
-async function opfsWrite(fileName: string, data: Uint8Array | Blob): Promise<void> {
+async function opfsWrite(fileName: string, data: Uint8Array | Blob | string): Promise<void> {
   const root = await navigator.storage.getDirectory();
   const dir = await root.getDirectoryHandle("piper", { create: true });
   const handle = await dir.getFileHandle(fileName, { create: true });
@@ -53,7 +53,9 @@ async function opfsWrite(fileName: string, data: Uint8Array | Blob): Promise<voi
   const chunk =
     data instanceof Blob
       ? data
-      : new Blob([data.buffer.slice(0) as ArrayBuffer]);
+      : typeof data === "string"
+        ? new Blob([data], { type: "application/json" })
+        : new Blob([data.buffer.slice(0) as ArrayBuffer]);
   await writable.write(chunk);
   await writable.close();
 }
@@ -97,6 +99,37 @@ async function fetchToUint8(
   return out;
 }
 
+/** Read and parse a JSON file from OPFS, or null if absent/corrupt. */
+async function opfsReadJson(fileName: string): Promise<any | null> {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle("piper");
+    const handle = await dir.getFileHandle(fileName);
+    const file = await handle.getFile();
+    return JSON.parse(await file.text());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ensure `speaker_id_map` exists on a model config. Older rhasspy configs
+ * only carry `num_speakers`, and piper-tts-web calls
+ * `Object.keys(config.speaker_id_map)` which throws on undefined. An empty
+ * map means "no sid input" which is correct for single-speaker models;
+ * multi-speaker models get sequential ids.
+ */
+function patchModelConfig(config: any): string {
+  if (config && typeof config === "object" && config.speaker_id_map == null) {
+    const n = typeof config.num_speakers === "number" ? config.num_speakers : 1;
+    const map: Record<number, number> = {};
+    for (let i = 0; i < n; i++) map[i] = i;
+    // Multi-speaker models need a sid input; single-speaker must stay empty.
+    config.speaker_id_map = n > 1 ? map : {};
+  }
+  return JSON.stringify(config);
+}
+
 /** True when the voice model is already cached in OPFS. */
 export async function isVoiceCached(voiceId: string): Promise<boolean> {
   if (voiceId === INDONESIAN_VOICE) {
@@ -109,20 +142,50 @@ export async function isVoiceCached(voiceId: string): Promise<boolean> {
   return list.includes(voiceId);
 }
 
+/** Remove corrupted cache files (404 bodies like "Entry not found" that the
+ *  package writes into OPFS when a voice is missing from PATH_MAP). */
+async function cleanupOpfs(): Promise<void> {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle("piper", { create: true });
+    for await (const name of dir.keys()) {
+      if (name.startsWith("undefined") || name === "null") {
+        try {
+          await dir.removeEntry(name);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Download and cache the voice model (once). */
 export async function ensureVoice(
   voiceId: string,
   onProgress?: (p: TtsProgress) => void
 ): Promise<void> {
+  await cleanupOpfs();
   if (voiceId === INDONESIAN_VOICE) {
-    if (await isVoiceCached(voiceId)) return;
+    const configName = `${INDONESIAN_VOICE}.onnx.json`;
+    if (await isVoiceCached(voiceId)) {
+      // Upgrade older cached configs that lack speaker_id_map.
+      const cfg = await opfsReadJson(configName);
+      if (cfg && cfg.speaker_id_map == null) {
+        await opfsWrite(configName, patchModelConfig(cfg));
+      }
+      return;
+    }
     const modelUrl = `${RHASSPY_BASE}/${INDONESIAN_PATH}`;
     const [model, config] = await Promise.all([
       fetchToUint8(modelUrl, (p) => onProgress?.(p)),
       fetchToUint8(`${modelUrl}.json`),
     ]);
+    const patched = patchModelConfig(JSON.parse(new TextDecoder().decode(config)));
     await opfsWrite(`${INDONESIAN_VOICE}.onnx`, model);
-    await opfsWrite(`${INDONESIAN_VOICE}.onnx.json`, config);
+    await opfsWrite(configName, patched);
     return;
   }
   await download(voiceId, (p: any) =>
@@ -133,11 +196,25 @@ export async function ensureVoice(
 let session: TtsSession | null = null;
 let sessionVoice: string | null = null;
 
+/**
+ * TtsSession is effectively a singleton: its constructor returns the existing
+ * static _instance WITHOUT re-running init(), so a new voice would silently
+ * keep the old model/config loaded. We clear the static instance whenever the
+ * voice changes to force a fresh init. Also note `session.ready` is never
+ * actually set by the package — `waitReady` (a Promise) is the real signal.
+ */
 async function getSession(
   voiceId: string,
   onProgress?: (p: TtsProgress) => void
 ): Promise<TtsSession> {
-  if (session && sessionVoice === voiceId && session.ready) return session;
+  if (!(PATH_MAP as Record<string, string>)[voiceId]) {
+    throw new Error(`Unknown TTS voice: ${voiceId}`);
+  }
+  if (session && sessionVoice === voiceId) {
+    await session.waitReady;
+    return session;
+  }
+  (TtsSession as unknown as { _instance: unknown })._instance = null;
   session = await TtsSession.create({
     voiceId,
     wasmPaths: LOCAL_WASM,
