@@ -209,9 +209,11 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
   );
 
   // Play the page-flip sound, throttled so rapid flips don't stack audio.
+  // Only triggered by the "flipping" state change, which fires exactly once
+  // per page turn — not from manual button handlers or the flip event.
   const playFlipSound = useCallback(() => {
     const now = Date.now();
-    if (now - lastFlipSoundAt.current < 250) return;
+    if (now - lastFlipSoundAt.current < 500) return;
     lastFlipSoundAt.current = now;
     const a = audioRef.current;
     if (!a) return;
@@ -274,7 +276,6 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
         const pageIdx: number = e.data;
         const humanPage = pageIdx + 1;
         setCurrentPage(humanPage);
-        playFlipSound();
         // Pre-render the visible pages and a small window ahead/behind.
         const visible = [pageIdx + 1, pageIdx + 2, pageIdx + 3, pageIdx - 1];
         visible.forEach((n) => {
@@ -282,9 +283,11 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
         });
       });
 
-      pf.on("changeState", () => {
-        // Sound also on the start of a flip for a crisper feel.
-        playFlipSound();
+      // PageFlip goes through read -> user_fold -> flipping -> read on every
+      // turn. Play the sound only on the "flipping" transition — once per
+      // page turn, right at the start of the animation.
+      pf.on("changeState", (e: any) => {
+        if (e?.data === "flipping") playFlipSound();
       });
 
       // Kick off rendering the initial visible pages.
@@ -314,14 +317,10 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
     onProgress(currentPage, numPages, ratio, percent);
   }, [currentPage, numPages, onProgress]);
 
-  const goPrev = () => {
-    playFlipSound();
-    pageFlipRef.current?.flipPrev();
-  };
-  const goNext = () => {
-    playFlipSound();
-    pageFlipRef.current?.flipNext();
-  };
+  // The "flipping" state change plays the sound — no manual trigger needed,
+  // and boundary flips (no more pages) stay silent since no state changes.
+  const goPrev = () => pageFlipRef.current?.flipPrev();
+  const goNext = () => pageFlipRef.current?.flipNext();
 
   // --- TTS read-aloud -------------------------------------------------------
 
@@ -562,7 +561,6 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
           numPages={numPages}
           current={currentPage}
           onSelect={(p) => {
-            playFlipSound();
             pageFlipRef.current?.flip(p - 1);
           }}
           accent={accent}
@@ -591,7 +589,6 @@ export default function PdfReader({ data, initialPage, onProgress, accent }: Pdf
               if (!isNaN(v)) {
                 const clamped = Math.min(numPages, Math.max(1, v));
                 setCurrentPage(clamped);
-                playFlipSound();
                 pageFlipRef.current?.flip(clamped - 1);
               }
             }}
